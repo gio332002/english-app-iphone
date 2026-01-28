@@ -13,8 +13,9 @@ SHEET_UNSURE = "Unsure"
 
 st.set_page_config(page_title="English Master", page_icon="🎓", layout="wide")
 
-# --- HÀM HỖ TRỢ AN TOÀN ---
+# --- HÀM HỖ TRỢ ---
 def standardize_dataframe(df, source_name_default="Unknown"):
+    """Đảm bảo DataFrame luôn có 3 cột chuẩn"""
     if len(df.columns) == 2:
         df.columns = ['Question', 'Answer']
         df['Source'] = source_name_default
@@ -29,6 +30,17 @@ def get_data_count(sheet_name):
         df = pd.read_excel(FILE_PATH, sheet_name=sheet_name)
         return len(df)
     except: return 0
+
+def get_unique_sources(sheet_name):
+    """Lấy danh sách các Unit đang có trong sheet Review/Unsure"""
+    try:
+        df = pd.read_excel(FILE_PATH, sheet_name=sheet_name)
+        df = standardize_dataframe(df, sheet_name)
+        if 'Source' in df.columns:
+            sources = df['Source'].unique().tolist()
+            return sorted([str(s) for s in sources])
+        return []
+    except: return []
 
 def remove_from_excel(sheet_name, question_text):
     try:
@@ -46,19 +58,31 @@ def remove_from_excel(sheet_name, question_text):
         st.error(f"Lỗi xóa file: {e}")
         return False
 
-def load_data(sheet_name, part=None):
+def load_data(mode, sheet_name_or_source, part=None):
+    """
+    mode: 'learn', 'review', 'unsure'
+    sheet_name_or_source: Tên Unit (nếu learn) hoặc Tên Source cần lọc (nếu review)
+    """
     try:
-        if sheet_name in [SHEET_REVIEW, SHEET_UNSURE]:
-            df = pd.read_excel(FILE_PATH, sheet_name=sheet_name)
-            df = standardize_dataframe(df, source_name_default=sheet_name)
+        # 1. CHẾ ĐỘ ÔN TẬP
+        if mode in ['review', 'unsure']:
+            target_sheet = SHEET_REVIEW if mode == 'review' else SHEET_UNSURE
+            df = pd.read_excel(FILE_PATH, sheet_name=target_sheet)
+            df = standardize_dataframe(df, source_name_default=target_sheet)
+            
+            # Lọc theo Unit cụ thể (Source)
+            if sheet_name_or_source != "Tất cả":
+                df = df[df['Source'] == sheet_name_or_source]
+        
+        # 2. CHẾ ĐỘ HỌC MỚI
         else:
-            full_df = pd.read_excel(FILE_PATH, sheet_name=sheet_name)
+            full_df = pd.read_excel(FILE_PATH, sheet_name=sheet_name_or_source)
             if part == 1:
                 df = full_df.iloc[:, [0, 1]].copy()
-                source_label = f"{sheet_name} (Part 1)"
+                source_label = f"{sheet_name_or_source} (Part 1)"
             else:
                 df = full_df.iloc[:, [2, 3]].copy()
-                source_label = f"{sheet_name} (Part 2)"
+                source_label = f"{sheet_name_or_source} (Part 2)"
             df = standardize_dataframe(df, source_name_default=source_label)
 
         if df.empty: return []
@@ -87,18 +111,15 @@ def save_unsure_to_excel(card):
             df_combined.to_excel(writer, sheet_name=SHEET_UNSURE, index=False)
         return True
     except Exception as e:
-        st.error(f"Lỗi lưu file: {e}")
         return False
 
 def get_audio_html(text):
     try:
         filename = f"audio_{random.randint(1000,9999)}.mp3"
-        # Dọn dẹp file cũ
         for f in os.listdir():
             if f.endswith(".mp3") and "audio_" in f:
                 try: os.remove(f)
                 except: pass
-        
         tts = gTTS(text=str(text), lang='en')
         tts.save(filename)
         f = open(filename, 'rb')
@@ -113,61 +134,78 @@ if 'current_idx' not in st.session_state: st.session_state.current_idx = 0
 if 'score' not in st.session_state: st.session_state.score = 0
 if 'revealed_indices' not in st.session_state: st.session_state.revealed_indices = set()
 if 'current_mode' not in st.session_state: st.session_state.current_mode = "learn"
-# Biến trạng thái trả lời: None, 'correct', 'wrong'
 if 'answer_status' not in st.session_state: st.session_state.answer_status = None 
 
-# --- SIDEBAR ---
+# --- SIDEBAR (MENU CẢI TIẾN) ---
 st.title("🎓 English Master")
 
 with st.sidebar:
     st.header("📊 Dashboard")
-    count_review = get_data_count(SHEET_REVIEW)
-    count_unsure = get_data_count(SHEET_UNSURE)
-    
+    c_rev = get_data_count(SHEET_REVIEW)
+    c_uns = get_data_count(SHEET_UNSURE)
     col1, col2 = st.columns(2)
-    with col1: st.metric("Cần ôn (Sai)", count_review, delta_color="inverse")
-    with col2: st.metric("Chưa chắc", count_unsure, delta_color="off")
-    
+    with col1: st.metric("Cần ôn", c_rev, delta_color="inverse")
+    with col2: st.metric("Chưa chắc", c_uns, delta_color="off")
     st.markdown("---")
-    st.header("⚙️ Chọn bài học")
-    try:
-        xls = pd.ExcelFile(FILE_PATH)
-        all_sheets = xls.sheet_names
-        unit_sheets = [s for s in all_sheets if s not in [SHEET_REVIEW, SHEET_UNSURE]]
-        options = unit_sheets + ["---", "Ôn tập: Câu Sai (Review)", "Ôn tập: Chưa Chắc (Unsure)"]
-    except:
-        st.error("Chưa có file Excel!")
-        options = []
 
-    selected_option = st.selectbox("Danh sách:", options)
-
-    selected_part = None
-    target_mode = "learn"
+    st.header("⚙️ Cài đặt học")
     
-    if selected_option == "Ôn tập: Câu Sai (Review)": target_mode = "review"
-    elif selected_option == "Ôn tập: Chưa Chắc (Unsure)": target_mode = "unsure"
-    elif selected_option != "---":
-        st.caption("Cấu trúc Unit:")
-        selected_part = st.radio("Chọn phần:", [1, 2], format_func=lambda x: f"Phần {x} (Cột {'A-B' if x==1 else 'C-D'})")
+    # 1. CHỌN CHẾ ĐỘ TRƯỚC
+    study_mode = st.radio("Chế độ:", ["Học bài mới", "Ôn tập câu Sai", "Ôn tập Chưa chắc"])
+    
+    selected_unit_or_source = None
+    selected_part = None
+    
+    # 2. HIỂN THỊ MENU CON TÙY THEO CHẾ ĐỘ
+    try:
+        if study_mode == "Học bài mới":
+            xls = pd.ExcelFile(FILE_PATH)
+            # Lấy list Unit
+            unit_sheets = [s for s in xls.sheet_names if s not in [SHEET_REVIEW, SHEET_UNSURE]]
+            selected_unit_or_source = st.selectbox("Chọn Unit:", unit_sheets)
+            
+            if selected_unit_or_source:
+                selected_part = st.radio("Chọn phần:", [1, 2], format_func=lambda x: f"Phần {x} (Cột {'A-B' if x==1 else 'C-D'})")
+                
+        elif study_mode == "Ôn tập câu Sai":
+            # Lấy list nguồn trong Review
+            sources = get_unique_sources(SHEET_REVIEW)
+            if not sources:
+                st.warning("Chưa có câu sai nào!")
+            else:
+                sources = ["Tất cả"] + sources
+                selected_unit_or_source = st.selectbox("Chọn nguồn ôn:", sources)
+                
+        elif study_mode == "Ôn tập Chưa chắc":
+            # Lấy list nguồn trong Unsure
+            sources = get_unique_sources(SHEET_UNSURE)
+            if not sources:
+                st.warning("Chưa có câu chưa chắc nào!")
+            else:
+                sources = ["Tất cả"] + sources
+                selected_unit_or_source = st.selectbox("Chọn nguồn ôn:", sources)
 
+    except Exception as e:
+        st.error(f"Lỗi file Excel: {e}")
+
+    # NÚT BẮT ĐẦU
     if st.button("BẮT ĐẦU HỌC 🚀", type="primary"):
-        target_sheet = ""
-        if target_mode == "review": target_sheet = SHEET_REVIEW
-        elif target_mode == "unsure": target_sheet = SHEET_UNSURE
-        elif selected_option != "---": target_sheet = selected_option
+        internal_mode = "learn"
+        if study_mode == "Ôn tập câu Sai": internal_mode = "review"
+        elif study_mode == "Ôn tập Chưa chắc": internal_mode = "unsure"
         
-        if target_sheet:
-            data = load_data(target_sheet, selected_part)
+        if selected_unit_or_source:
+            data = load_data(internal_mode, selected_unit_or_source, selected_part)
             if data:
                 st.session_state.questions = data
                 st.session_state.current_idx = 0
                 st.session_state.score = 0
                 st.session_state.revealed_indices = set()
-                st.session_state.current_mode = target_mode
-                st.session_state.answer_status = None # Reset trạng thái
+                st.session_state.current_mode = internal_mode
+                st.session_state.answer_status = None
                 st.rerun()
             else:
-                st.warning("Bài này chưa có dữ liệu!")
+                st.warning("Không có dữ liệu!")
 
 # --- MAIN SCREEN ---
 if len(st.session_state.questions) > 0:
@@ -178,11 +216,11 @@ if len(st.session_state.questions) > 0:
         total = len(st.session_state.questions)
         answer_text = str(q_data['Answer']).strip()
         
-        # 1. Info Bar
+        # Thanh tiến trình + Info
         st.progress((idx) / total)
-        st.caption(f"Câu {idx + 1}/{total} | Chế độ: {st.session_state.current_mode.upper()}")
+        st.caption(f"Câu {idx + 1}/{total} | {st.session_state.current_mode.upper()} | Nguồn: {q_data.get('Source', 'Unknown')}")
 
-        # 2. Question Area
+        # Câu hỏi
         st.info(f"❓: {q_data['Question']}")
         
         c1, c2, c3 = st.columns([1, 2, 1])
@@ -191,11 +229,12 @@ if len(st.session_state.questions) > 0:
                 audio_bytes = get_audio_html(q_data['Question'])
                 if audio_bytes: st.audio(audio_bytes, format='audio/mp3')
         with c3:
+            # Nút Lưu thủ công (Ẩn nếu đang ở chế độ Unsure để tránh lưu trùng)
             if st.session_state.current_mode != "unsure":
                 if st.button("💾 Lưu nghi ngờ"):
                     if save_unsure_to_excel(q_data): st.toast("Đã lưu!", icon="✅")
 
-        # Hint Visual
+        # --- VISUAL HINT ---
         st.write("---")
         hint_html = "<div style='line-height: 2.5;'>"
         for i, char in enumerate(answer_text):
@@ -207,13 +246,22 @@ if len(st.session_state.questions) > 0:
         hint_html += "</div>"
         st.markdown(hint_html, unsafe_allow_html=True)
         
+        # --- NÚT GỢI Ý & AUTO SAVE ---
         if st.button("💡 Mở 1 chữ cái"):
             unrevealed = [i for i, c in enumerate(answer_text) if c != " " and i not in st.session_state.revealed_indices]
             if unrevealed:
+                # 1. Mở chữ
                 st.session_state.revealed_indices.add(random.choice(unrevealed))
+                
+                # 2. TỰ ĐỘNG LƯU UNSURE (Logic bạn yêu cầu)
+                # Chỉ lưu nếu không phải đang học trong chính mục Unsure
+                if st.session_state.current_mode != "unsure":
+                    if save_unsure_to_excel(q_data):
+                        st.toast("Dùng gợi ý -> Đã tự động lưu vào 'Chưa chắc'", icon="💾")
+                
                 st.rerun()
 
-        # 3. Answer Form (Chỉ hiện khi chưa trả lời đúng)
+        # FORM TRẢ LỜI
         if st.session_state.answer_status != 'correct':
             with st.form(key=f"form_{idx}"):
                 user_input = st.text_input("Nhập đáp án:")
@@ -223,49 +271,41 @@ if len(st.session_state.questions) > 0:
                 if user_input.strip().lower() == answer_text.lower():
                     st.session_state.answer_status = 'correct'
                     st.session_state.score += 1
-                    st.rerun() # Rerun để ẩn form và hiện kết quả
+                    st.rerun()
                 else:
                     st.session_state.answer_status = 'wrong'
                     st.rerun()
 
-        # --- XỬ LÝ KẾT QUẢ (HIỆN BÊN DƯỚI) ---
-        
-        # A. KHI TRẢ LỜI ĐÚNG
+        # --- XỬ LÝ KẾT QUẢ ---
         if st.session_state.answer_status == 'correct':
             st.success("✅ CHÍNH XÁC!")
             st.balloons()
-            
-            # Audio Đáp án
             st.write("🔊 Nghe đáp án:")
             audio_ans = get_audio_html(answer_text)
             if audio_ans: st.audio(audio_ans, format='audio/mp3')
 
             st.markdown("---")
             
-            # Nếu là chế độ ÔN TẬP -> Hiện nút Xóa/Giữ
+            # Logic XÓA nếu đang Ôn tập
             if st.session_state.current_mode in ["review", "unsure"]:
                 st.info("💡 Bạn đã thuộc bài này chưa?")
                 c_del, c_next = st.columns(2)
                 with c_del:
-                    if st.button("🗑️ CÓ, XÓA NGAY", type="primary"):
+                    if st.button("🗑️ CÓ, XÓA LUÔN", type="primary"):
                         sheet_to_del = SHEET_REVIEW if st.session_state.current_mode == "review" else SHEET_UNSURE
                         if remove_from_excel(sheet_to_del, q_data['Question']):
-                            st.toast("Đã xóa!", icon="🗑️")
+                            st.toast("Đã xóa khỏi danh sách!", icon="🗑️")
                         
-                        # Reset và qua câu mới
                         st.session_state.current_idx += 1
                         st.session_state.revealed_indices = set()
                         st.session_state.answer_status = None
                         st.rerun()
-                
                 with c_next:
-                    if st.button("➡️ GIỮ LẠI & TIẾP TỤC"):
+                    if st.button("➡️ GIỮ LẠI ÔN TIẾP"):
                         st.session_state.current_idx += 1
                         st.session_state.revealed_indices = set()
                         st.session_state.answer_status = None
                         st.rerun()
-            
-            # Nếu là chế độ HỌC THƯỜNG -> Hiện nút Tiếp tục
             else:
                 if st.button("➡️ Tiếp tục câu sau", type="primary"):
                     st.session_state.current_idx += 1
@@ -273,16 +313,13 @@ if len(st.session_state.questions) > 0:
                     st.session_state.answer_status = None
                     st.rerun()
 
-        # B. KHI TRẢ LỜI SAI
         elif st.session_state.answer_status == 'wrong':
             st.error(f"❌ Sai rồi! Đáp án đúng: {answer_text}")
-            
-            st.write("🔊 Nghe đáp án:")
             audio_ans = get_audio_html(answer_text)
             if audio_ans: st.audio(audio_ans, format='audio/mp3')
             
             if st.button("➡️ Tiếp tục (Đi câu sau)"):
-                # Logic lưu vào Review nếu đang học thường
+                # Lưu vào Review nếu đang học mới
                 if st.session_state.current_mode == "learn":
                     try:
                         new_row = pd.DataFrame([{
@@ -296,7 +333,6 @@ if len(st.session_state.questions) > 0:
                             df_rev.to_excel(writer, sheet_name=SHEET_REVIEW, index=False)
                     except: pass
                 
-                # Qua câu mới
                 st.session_state.current_idx += 1
                 st.session_state.revealed_indices = set()
                 st.session_state.answer_status = None
@@ -315,6 +351,5 @@ if len(st.session_state.questions) > 0:
             st.session_state.answer_status = None
             random.shuffle(st.session_state.questions)
             st.rerun()
-
 else:
-    st.info("👈 Chọn bài học ở Menu bên trái.")
+    st.info("👈 Chọn Chế độ và Bài học ở Menu bên trái.")
